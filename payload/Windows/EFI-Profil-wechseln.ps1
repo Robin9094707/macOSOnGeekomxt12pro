@@ -13,18 +13,22 @@ try {
     $dataPart = Get-Partition -DriveLetter $dataLetter
     $disk = Get-Disk -Number $dataPart.DiskNumber
     if ([string]$disk.BusType -ne 'USB' -or $disk.IsBoot -or $disk.IsSystem) { throw 'Bitte direkt von der externen XT12-Platte starten.' }
-    $bootPart = @(Get-Partition -DiskNumber $disk.Number | Where-Object {
-        ($_ | Get-Volume -ErrorAction SilentlyContinue).FileSystemLabel -eq 'XT12BOOT' })
-    if ($bootPart.Count -ne 1) { throw 'XT12BOOT wurde auf dieser Platte nicht gefunden.' }
-    $bootPart = $bootPart[0]
-    $letter = [string]$bootPart.DriveLetter
+    # The EFI partition XT12BOOT usually has no drive letter in Windows: find it through WMI and mount it briefly.
+    $paths = @{}
+    foreach ($p in @(Get-Partition -DiskNumber $disk.Number)) {
+        foreach ($ap in @($p.AccessPaths)) { if ($ap -like '\\?\Volume{*') { $paths[$ap.ToUpperInvariant()] = $true } }
+    }
+    $vols = @(Get-CimInstance -ClassName Win32_Volume | Where-Object { $_.Label -eq 'XT12BOOT' })
+    $onDisk = @($vols | Where-Object { $paths.ContainsKey(([string]$_.DeviceID).ToUpperInvariant()) })
+    if ($onDisk.Count -eq 1) { $vol = $onDisk[0] } elseif ($vols.Count -eq 1) { $vol = $vols[0] }
+    else { throw 'XT12BOOT wurde auf dieser Platte nicht eindeutig gefunden.' }
+    $letter = ([string]$vol.DriveLetter).TrimEnd(':')
     if ($letter -notmatch '^[A-Z]$') {
         $used = @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { [string]$_.Name })
         $letter = @('X', 'W', 'V', 'U', 'T', 'S', 'R') | Where-Object { $used -notcontains $_ } | Select-Object -First 1
-        $guidPath = @($bootPart.AccessPaths | Where-Object { $_ -like '\\?\Volume{*' })[0]
-        & "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') $guidPath | Out-Null
+        & "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') $vol.DeviceID | Out-Null
         $mounted = $letter
-        Start-Sleep -Seconds 1
+        for ($i = 0; $i -lt 20 -and -not (Test-Path ($letter + ':\')); $i++) { Start-Sleep -Milliseconds 500 }
     }
     $root = $letter + ':\'
     $active = Join-Path $root 'EFI'
