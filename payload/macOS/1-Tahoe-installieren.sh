@@ -68,9 +68,26 @@ free_kb=$(df -k "$T" | awk 'NR==2 {print $4}')
 
 # 3. Installer aufs Ziel entpacken und starten (streamt direkt auf die Platte, nicht in den kleinen RAM der Recovery)
 say "Entpacke Apples Tahoe-Installer auf $T (einige Minuten) ..."
-/usr/sbin/installer -pkg "$PKG" -target "$T" || stop "Das Installer-Paket liess sich nicht installieren."
-APP=$(ls -d "$T"/Applications/Install\ macOS*.app 2>/dev/null | head -1)
-[ -n "$APP" ] || stop "Die Installer-App ist auf $T nicht erschienen."
+APP=""
+if /usr/sbin/installer -pkg "$PKG" -target "$T"; then
+  APP=$(ls -d "$T"/Applications/Install\ macOS*.app 2>/dev/null | head -1)
+fi
+if [ -z "$APP" ]; then
+  # Apples Paketskripte scheitern in manchen Recovery-Umgebungen. Dann das Paket ohne seine Skripte entpacken.
+  say "Apples Paketskript ist fehlgeschlagen - entpacke das Paket direkt (5-15 Minuten, ohne Anzeige) ..."
+  grep -i -E "error|fail" /var/log/install.log 2>/dev/null | tail -5
+  rm -rf "$T/IA"
+  /usr/sbin/pkgutil --expand-full "$PKG" "$T/IA" || stop "pkgutil konnte das Paket nicht entpacken."
+  APP=$(ls -d "$T"/IA/Payload/Applications/Install\ macOS*.app 2>/dev/null | head -1)
+  [ -n "$APP" ] || APP=$(ls -d "$T"/IA/Payload/Install\ macOS*.app 2>/dev/null | head -1)
+  [ -n "$APP" ] || stop "Im entpackten Paket ($T/IA) fehlt die Installer-App."
+  if [ ! -f "$APP/Contents/SharedSupport/SharedSupport.dmg" ]; then
+    dmg=$(find "$T/IA" -name SharedSupport.dmg -size +1000000k 2>/dev/null | head -1)
+    [ -n "$dmg" ] || stop "SharedSupport.dmg wurde im entpackten Paket nicht gefunden."
+    mkdir -p "$APP/Contents/SharedSupport" && mv "$dmg" "$APP/Contents/SharedSupport/SharedSupport.dmg"
+  fi
+fi
+[ -x "$APP/Contents/Resources/startosinstall" ] || stop "startosinstall fehlt in $APP."
 
 cat <<'EOF'
 
