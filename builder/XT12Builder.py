@@ -360,6 +360,11 @@ def full_disk(cache, offer_esp=True):
         step("Schreibe XT12BOOT: OpenCore BASIS + IRIS, Tahoe-Recovery, BIOS-Anleitung")
         write_boot(boot, efis, recovery, verify_efi_copy)
         write_payload(data)
+        step("Stelle XT12BOOT auf EFI-Systempartition um (bootfaehig; Windows blendet sie danach aus)")
+        check_letters(disk, drives)
+        powershell("Disk.ps1", "-Action", "Seal", "-ExpectedToken", disk["token"])
+        drives["boot"] = "-"
+        print("  OK: XT12BOOT ist jetzt die EFI-Partition der Platte.")
 
         step("Lade/kopiere Apples macOS 26 Tahoe Vollinstaller nach XT12DATA\\Tahoe (danach keine Online-Recovery noetig)")
         check_letters(disk, drives)
@@ -382,7 +387,7 @@ def full_disk(cache, offer_esp=True):
 
 def summary(drives, product, efis):
     title("FERTIG - die externe Platte ist ein komplettes Offline-Installationsmedium")
-    print(f"""  XT12BOOT ({drives['boot']}:)  OpenCore (Profil BASIS aktiv, IRIS vorbereitet), Tahoe-Recovery
+    print(f"""  XT12BOOT (EFI)  OpenCore (Profil BASIS aktiv, IRIS vorbereitet), Tahoe-Recovery
   XT12DATA ({drives['data']}:)  Tahoe {product['version']} Vollinstaller, macOS 27.2 + KDK + Liberator, Iris-Xe-Paket
   {'MACOS             wird in der Recovery automatisch zu APFS "Macintosh HD"' if drives.get('macos') else ''}
 

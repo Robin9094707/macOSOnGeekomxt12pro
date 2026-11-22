@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('List', 'Prepare', 'Check', 'Find')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('List', 'Prepare', 'Check', 'Find', 'Seal')][string]$Action,
     [uint32]$Number,
     [string]$ExpectedToken,
     [string]$Letters,
@@ -11,11 +11,17 @@ param(
 # or drive letter that moved can never point the builder at another disk.
 #
 # Layout written by Prepare (GPT):
-#   1  EFI system partition, 2 GiB FAT32 "XT12BOOT"  OpenCore, Tahoe recovery, profiles, BIOS guide
-#   2  exFAT "XT12DATA"                                Tahoe full installer, macOS 27 files, Liberator, Iris Xe, scripts
-#   3  exFAT "MACOS" (only with -WithMacos)            placeholder; the Recovery script erases it as APFS for macOS
+#   XT12BOOT  2 GiB FAT32   OpenCore, Tahoe recovery, profiles, BIOS guide
+#   XT12DATA  exFAT          Tahoe full installer, macOS 27 files, Liberator, Iris Xe, scripts
+#   MACOS     exFAT          (only with -WithMacos) placeholder; the Recovery script erases it as APFS for macOS
+#
+# Windows protects EFI system partitions (no drive letter, no reliable access). So XT12BOOT is created and written as an
+# ordinary FAT32 partition and only "sealed" as EFI system partition at the very end (Seal). Find (resume) unseals it
+# again before anything is written.
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$EspType = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+$DataType = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'
 
 function Test-UsbDisk($Disk) {
     $null -ne $Disk -and [string]$Disk.BusType -eq 'USB' -and $Disk.Path -and $Disk.Size -ge 30GB -and
@@ -38,27 +44,39 @@ function Get-Letters($Disk) {
         Where-Object { $_.DriveLetter -match '^[A-Z]$' } | ForEach-Object { ([string]$_.DriveLetter) + ':' })
 }
 
-function Get-DiskVolumes($Disk) {
-    # Label -> {letter, fs, path} for every volume on this disk. Windows' storage cmdlets (Get-Partition -DriveLetter,
-    # Get-Volume) do not reliably report a drive letter on an EFI system partition that diskpart just mounted, so the
-    # volumes are read through WMI (Win32_Volume) and tied to the disk by their volume path or their partition.
-    Update-HostStorageCache -ErrorAction SilentlyContinue
-    $paths = @{}
-    foreach ($p in @(Get-Partition -DiskNumber $Disk.Number -ErrorAction SilentlyContinue)) {
-        foreach ($ap in @($p.AccessPaths)) { if ($ap -like '\\?\Volume{*') { $paths[$ap.ToUpperInvariant()] = $true } }
+function Get-MountLetters {
+    # Volume path -> drive letter, straight from the mount manager (mountvol). Unlike WMI and the storage cmdlets it
+    # also knows letters that diskpart gave to an EFI system partition.
+    $map = @{}
+    $current = $null
+    foreach ($line in (& "$env:SystemRoot\System32\mountvol.exe")) {
+        $text = ([string]$line).Trim()
+        if ($text -like '\\?\Volume{*') { $current = $text.ToUpperInvariant() }
+        elseif ($current -and $text -match '^([A-Z]):\\$') { $map[$current] = $Matches[1] }
+        elseif (-not $text) { $current = $null }
     }
+    $map
+}
+
+function Get-DiskVolumes($Disk) {
+    # Label -> {letter, fs, path, partition, type} for every labelled volume on this disk (read through WMI and tied to
+    # the disk by the partition's volume path).
+    Update-HostStorageCache -ErrorAction SilentlyContinue
+    $parts = @{}
+    foreach ($p in @(Get-Partition -DiskNumber $Disk.Number -ErrorAction SilentlyContinue)) {
+        foreach ($ap in @($p.AccessPaths)) { if ($ap -like '\\?\Volume{*') { $parts[$ap.ToUpperInvariant()] = $p } }
+    }
+    $mounts = Get-MountLetters
     $map = @{}
     foreach ($v in @(Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
-        if (-not $v.Label) { continue }
+        $path = ([string]$v.DeviceID).ToUpperInvariant()
+        if (-not $v.Label -or -not $parts.ContainsKey($path)) { continue }
         $letter = ([string]$v.DriveLetter).TrimEnd(':')
-        $onDisk = $paths.ContainsKey(([string]$v.DeviceID).ToUpperInvariant())
-        if (-not $onDisk -and $letter -match '^[A-Z]$') {
-            $parts = @(Get-CimInstance -Query ("ASSOCIATORS OF {Win32_LogicalDisk.DeviceID='" + $letter +
-                ":'} WHERE AssocClass=Win32_LogicalDiskToPartition") -ErrorAction SilentlyContinue)
-            $onDisk = [bool]($parts | Where-Object { $_.DiskIndex -eq $Disk.Number })
-        }
-        if ($onDisk) {
-            $map[[string]$v.Label] = [pscustomobject]@{ letter = $letter; fs = [string]$v.FileSystem; path = [string]$v.DeviceID }
+        if ($letter -notmatch '^[A-Z]$' -and $mounts.ContainsKey($path)) { $letter = $mounts[$path] }
+        $p = $parts[$path]
+        $map[[string]$v.Label] = [pscustomobject]@{
+            letter = $letter; fs = [string]$v.FileSystem; path = [string]$v.DeviceID
+            partition = [int]$p.PartitionNumber; type = ([string]$p.GptType).ToLowerInvariant()
         }
     }
     $map
@@ -71,31 +89,11 @@ function Get-Labeled($Disk) {
     $map
 }
 
-function Mount-Label($Disk, $Label) {
-    # Gives a volume of this disk a drive letter when it has none (an EFI partition after re-plugging, for example).
-    $vol = (Get-DiskVolumes $Disk)[$Label]
-    if (-not $vol) { throw "Die Partition $Label wurde auf der Platte nicht gefunden." }
-    if ($vol.letter -match '^[A-Z]$') { return $vol.letter }
-    $letter = @(Get-FreeLetters)[0]
-    & "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') $vol.path | Out-Null
-    for ($i = 0; $i -lt 20 -and -not (Test-Path ($letter + ':\')); $i++) { Start-Sleep -Milliseconds 500 }
-    if (-not (Test-Path ($letter + ':\'))) { throw "Die Partition $Label liess sich nicht als $letter`: einbinden." }
-    $letter
-}
-
-function Assert-Letter($Letter, $FileSystem, $Label) {
-    if ($Letter -notmatch '^[A-Z]$') { throw "Die Partition $Label hat keinen Laufwerksbuchstaben." }
-    $vol = (Get-DiskVolumes (Find-SelectedDisk))[$Label]
-    if (-not $vol -or $vol.letter -ne $Letter -or $vol.fs -ne $FileSystem) {
-        $seen = if ($vol) { $vol.letter + ': ' + $vol.fs } else { 'nicht gefunden' }
-        throw ('Das Laufwerk ' + $Letter + ': passt nicht mehr zur ausgewaehlten Platte (' + $Label + ' / ' + $FileSystem + ', gesehen: ' + $seen + ').')
-    }
-}
-
 function Get-FreeLetters {
     $used = @()
     $used += @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { [string]$_.Name })
     $used += @(Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { [string]$_.DriveLetter })
+    $used += @((Get-MountLetters).Values)
     @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P', 'O', 'N', 'M', 'L', 'K', 'J', 'I', 'H', 'G') |
         Where-Object { $used -notcontains $_ }
 }
@@ -108,6 +106,47 @@ function Invoke-Diskpart([string[]]$Lines) {
         @{ code = $LASTEXITCODE; text = $output }
     }
     finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+}
+
+function Set-PartType($Disk, [int]$Partition, [string]$Type) {
+    $result = Invoke-Diskpart @("select disk $($Disk.Number)", "select partition $Partition",
+        ('set id=' + $Type.Trim('{', '}') + ' override'), 'exit')
+    Start-Sleep -Seconds 2
+    $now = ([string](Get-Partition -DiskNumber $Disk.Number -PartitionNumber $Partition).GptType).ToLowerInvariant()
+    if ($now -ne $Type) { throw ("Partitionstyp liess sich nicht setzen:`n" + $result.text) }
+}
+
+function Mount-Label($Disk, $Label) {
+    # The letter a volume of this disk really has; one is given when it has none.
+    $vol = (Get-DiskVolumes $Disk)[$Label]
+    if (-not $vol) { throw "Die Partition $Label wurde auf der Platte nicht gefunden." }
+    if ($vol.letter -match '^[A-Z]$' -and (Test-Path ($vol.letter + ':\'))) { return $vol.letter }
+    $letter = @(Get-FreeLetters)[0]
+    try { Get-Partition -DiskNumber $Disk.Number -PartitionNumber $vol.partition | Set-Partition -NewDriveLetter $letter -ErrorAction Stop }
+    catch { & "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') $vol.path | Out-Null }
+    for ($i = 0; $i -lt 20 -and -not (Test-Path ($letter + ':\')); $i++) { Start-Sleep -Milliseconds 500 }
+    if (-not (Test-Path ($letter + ':\'))) { throw "Die Partition $Label liess sich nicht als $letter`: einbinden." }
+    $letter
+}
+
+function Assert-Letter($Letter, $FileSystem, $Label) {
+    if ($Letter -notmatch '^[A-Z]$') { throw "Die Partition $Label hat keinen Laufwerksbuchstaben." }
+    $vol = (Get-DiskVolumes (Find-SelectedDisk))[$Label]
+    if (-not $vol -or $vol.letter -ne $Letter -or $vol.fs -ne $FileSystem) {
+        $seen = if ($vol) { [string]$vol.letter + ': ' + $vol.fs } else { 'nicht gefunden' }
+        throw ('Das Laufwerk ' + $Letter + ': passt nicht mehr zur ausgewaehlten Platte (' + $Label + ' / ' + $FileSystem + ', gesehen: ' + $seen + ').')
+    }
+}
+
+function Open-BootPartition($Disk) {
+    # Unseal XT12BOOT (EFI type -> ordinary data partition) so Windows mounts it normally, then return its letter.
+    $vol = (Get-DiskVolumes $Disk)['XT12BOOT']
+    if (-not $vol) { throw 'Die Partition XT12BOOT wurde auf der Platte nicht gefunden.' }
+    if ($vol.letter -match '^[A-Z]$') {
+        & "$env:SystemRoot\System32\mountvol.exe" ($vol.letter + ':') /d 2>$null | Out-Null
+    }
+    if ($vol.type -ne $DataType) { Set-PartType $Disk $vol.partition $DataType }
+    Mount-Label (Find-SelectedDisk) 'XT12BOOT'
 }
 
 if ($Action -eq 'List') {
@@ -128,18 +167,33 @@ if ($Action -eq 'Find') {
     $disk = Find-SelectedDisk
     $labels = Get-Labeled $disk
     if (-not ($labels.ContainsKey('XT12BOOT') -and $labels.ContainsKey('XT12DATA'))) { throw 'Auf dieser Platte ist kein frueherer XT12-Aufbau.' }
-    # Windows does not mount an EFI system partition by itself after re-plugging: give it a letter through its volume path.
-    foreach ($name in @('XT12BOOT', 'XT12DATA')) { $labels[$name] = Mount-Label $disk $name }
-    Assert-Letter $labels['XT12BOOT'] 'FAT32' 'XT12BOOT'
-    Assert-Letter $labels['XT12DATA'] 'exFAT' 'XT12DATA'
-    ConvertTo-Json -InputObject @{ boot = $labels['XT12BOOT']; data = $labels['XT12DATA']; macos = $labels.ContainsKey('MACOS') } -Compress
+    $boot = Open-BootPartition $disk
+    $data = Mount-Label (Find-SelectedDisk) 'XT12DATA'
+    Assert-Letter $boot 'FAT32' 'XT12BOOT'
+    Assert-Letter $data 'exFAT' 'XT12DATA'
+    ConvertTo-Json -InputObject @{ boot = $boot; data = $data; macos = $labels.ContainsKey('MACOS') } -Compress
     exit 0
 }
 
 if ($Action -eq 'Check') {
     $parts = $Letters -split ','
-    Assert-Letter $parts[0] 'FAT32' 'XT12BOOT'
+    if ($parts[0] -ne '-') { Assert-Letter $parts[0] 'FAT32' 'XT12BOOT' }   # '-': XT12BOOT is sealed as EFI partition
     Assert-Letter $parts[1] 'exFAT' 'XT12DATA'
+    exit 0
+}
+
+if ($Action -eq 'Seal') {
+    # Everything is written: XT12BOOT becomes the EFI system partition the firmware boots from.
+    $disk = Find-SelectedDisk
+    $vol = (Get-DiskVolumes $disk)['XT12BOOT']
+    if (-not $vol) { throw 'Die Partition XT12BOOT wurde auf der Platte nicht gefunden.' }
+    if ($vol.letter -match '^[A-Z]$') {
+        Get-Partition -DiskNumber $disk.Number -PartitionNumber $vol.partition |
+            Remove-PartitionAccessPath -AccessPath ($vol.letter + ':\') -ErrorAction SilentlyContinue
+        & "$env:SystemRoot\System32\mountvol.exe" ($vol.letter + ':') /d 2>$null | Out-Null
+    }
+    if ($vol.type -ne $EspType) { Set-PartType $disk $vol.partition $EspType }
+    ConvertTo-Json -InputObject @{ sealed = $true; partition = $vol.partition } -Compress
     exit 0
 }
 
@@ -150,33 +204,23 @@ $free = @(Get-FreeLetters)
 if ($free.Count -lt 2) { throw 'Es sind keine zwei freien Laufwerksbuchstaben mehr frei (G: bis Z:).' }
 $bootLetter = $free[0]; $dataLetter = $free[1]
 if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }
-
-function Get-Script([bool]$TrueEsp) {
-    $lines = @("select disk $($disk.Number)", 'clean', 'convert gpt')
-    if ($TrueEsp) { $lines += 'create partition efi size=2048' } else { $lines += 'create partition primary size=2048' }
-    $lines += @('format quick fs=fat32 label="XT12BOOT"', "assign letter=$bootLetter")
-    if ($WithMacos) { $lines += "create partition primary size=$DataMB" } else { $lines += 'create partition primary' }
-    $lines += @('format quick fs=exfat label="XT12DATA"', "assign letter=$dataLetter")
-    if ($WithMacos) { $lines += @('create partition primary', 'format quick fs=exfat label="MACOS"', 'remove all noerr') }
-    $lines += 'exit'
-    $lines
+# Drop letters a previous run may have left on this disk's volumes (the mount manager keeps them for an EFI partition).
+foreach ($vol in (Get-DiskVolumes $disk).Values) {
+    if ($vol.letter -match '^[A-Z]$') { & "$env:SystemRoot\System32\mountvol.exe" ($vol.letter + ':') /d 2>$null | Out-Null }
 }
 
-# A real EFI system partition first (what every UEFI firmware boots from); a FAT32 data partition as the fallback for
-# Windows builds that refuse an ESP on a USB disk.
-$result = Invoke-Diskpart (Get-Script $true)
+$lines = @("select disk $($disk.Number)", 'clean', 'convert gpt', 'create partition primary size=2048',
+    'format quick fs=fat32 label="XT12BOOT"', "assign letter=$bootLetter")
+if ($WithMacos) { $lines += "create partition primary size=$DataMB" } else { $lines += 'create partition primary' }
+$lines += @('format quick fs=exfat label="XT12DATA"', "assign letter=$dataLetter")
+if ($WithMacos) { $lines += @('create partition primary', 'format quick fs=exfat label="MACOS"', 'remove all noerr') }
+$lines += 'exit'
+$result = Invoke-Diskpart $lines
 Start-Sleep -Seconds 3
 $labels = Get-Labeled (Find-SelectedDisk)
 if (-not ($labels.ContainsKey('XT12BOOT') -and $labels.ContainsKey('XT12DATA'))) {
-    $result = Invoke-Diskpart (Get-Script $false)
-    Start-Sleep -Seconds 3
-    $labels = Get-Labeled (Find-SelectedDisk)
-}
-if (-not ($labels.ContainsKey('XT12BOOT') -and $labels.ContainsKey('XT12DATA'))) {
     throw ("diskpart konnte die Platte nicht aufteilen:`n" + $result.text)
 }
-for ($i = 0; $i -lt 10 -and (-not (Test-Path ($bootLetter + ':\')) -or -not (Test-Path ($dataLetter + ':\'))); $i++) { Start-Sleep -Seconds 1 }
-# Use the letters the volumes really have; mount one that diskpart left without a letter.
 $disk = Find-SelectedDisk
 $bootLetter = Mount-Label $disk 'XT12BOOT'
 $dataLetter = Mount-Label $disk 'XT12DATA'
