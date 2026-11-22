@@ -206,6 +206,13 @@ def ensure_tahoe(fullinstaller, product, cache, target_dir):
     stamp = cache_folder / (fullinstaller.PACKAGE_NAME + ".ok")
     if target_dir is None:
         return AppleInstaller.fetch_tahoe(fullinstaller, product, cache_folder)
+    # Builder 2.0 put the package one folder too deep on the disk (Tahoe\\Tahoe-<build>\\). Move it up, no new download.
+    misplaced = Path(target_dir) / ("Tahoe-" + product["build"])
+    for name in (fullinstaller.PACKAGE_NAME, fullinstaller.PACKAGE_NAME + ".ok", fullinstaller.PACKAGE_NAME + ".part"):
+        if (misplaced / name).is_file() and not (Path(target_dir) / name).exists():
+            (misplaced / name).replace(Path(target_dir) / name)
+    if misplaced.is_dir() and not any(misplaced.iterdir()):
+        misplaced.rmdir()
     if cached.is_file() and stamp.is_file() and len(stamp.read_text(encoding="ascii").split()) == 3:
         path, digest = AppleInstaller.fetch_tahoe(fullinstaller, product, cache_folder)
         return Fetch.copy_verified(path, Path(target_dir) / fullinstaller.PACKAGE_NAME, digest, "InstallAssistant.pkg"), digest

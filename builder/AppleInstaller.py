@@ -87,10 +87,10 @@ def choose_tahoe(fullinstaller, catalog_major, minimum):
     return product
 
 
-def fetch_tahoe(fullinstaller, product, directory):
-    """Returns (path, sha256) of a fully checked InstallAssistant.pkg for `product` inside directory/Tahoe-<build>/."""
+def fetch_tahoe(fullinstaller, product, folder):
+    """Returns (path, sha256) of a fully checked InstallAssistant.pkg for `product`, directly inside `folder`."""
     size = int(product["size"])
-    folder = Path(directory) / ("Tahoe-" + product["build"])
+    folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     final = folder / fullinstaller.PACKAGE_NAME
     stamp = folder / (fullinstaller.PACKAGE_NAME + ".ok")

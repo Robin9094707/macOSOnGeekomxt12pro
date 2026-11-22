@@ -21,6 +21,11 @@ stop() { printf '\nSTOPP: %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || stop "Bitte in der macOS-Wiederherstellung ausfuehren (dort ist das Terminal root)."
 [ -d "$DATA" ] || stop "$DATA ist nicht eingebunden. Ist die externe Platte angeschlossen? Im Festplattendienstprogramm XT12DATA aktivieren."
+if [ ! -f "$PKG" ]; then
+  # Builder 2.0 legte das Paket einen Ordner zu tief ab (Tahoe/Tahoe-<build>/): nach oben schieben, kein neuer Download.
+  old=$(ls "$DATA"/Tahoe/Tahoe-*/InstallAssistant.pkg 2>/dev/null | head -1)
+  [ -n "$old" ] && mv "$old" "$PKG" && echo "InstallAssistant.pkg aus ${old%/*} nach $DATA/Tahoe verschoben."
+fi
 [ -f "$PKG" ] || stop "$PKG fehlt. Der Windows-Builder ist nicht bis zum Ende gelaufen."
 
 # 1. Groesse gegen das Manifest des Windows-Builders pruefen (die volle SHA-256-Pruefung lief schon beim Kopieren).
