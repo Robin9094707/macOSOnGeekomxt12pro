@@ -94,6 +94,7 @@ function Get-FreeLetters {
     $used += @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { [string]$_.Name })
     $used += @(Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { [string]$_.DriveLetter })
     $used += @((Get-MountLetters).Values)
+    $used += @([Environment]::GetLogicalDrives() | ForEach-Object { ([string]$_).Substring(0, 1) })
     @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P', 'O', 'N', 'M', 'L', 'K', 'J', 'I', 'H', 'G') |
         Where-Object { $used -notcontains $_ }
 }
@@ -116,17 +117,49 @@ function Set-PartType($Disk, [int]$Partition, [string]$Type) {
     if ($now -ne $Type) { throw ("Partitionstyp liess sich nicht setzen:`n" + $result.text) }
 }
 
+function Test-Root($Letter) {
+    # .NET instead of Test-Path: PowerShell's drive provider often does not see a letter given during this session.
+    try { [IO.Directory]::Exists($Letter + ':\') } catch { $false }
+}
+
+function Wait-Root($Letter, $Seconds = 10) {
+    for ($i = 0; $i -lt ($Seconds * 2); $i++) {
+        if (Test-Root $Letter) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    $false
+}
+
 function Mount-Label($Disk, $Label) {
-    # The letter a volume of this disk really has; one is given when it has none.
-    $vol = (Get-DiskVolumes $Disk)[$Label]
-    if (-not $vol) { throw "Die Partition $Label wurde auf der Platte nicht gefunden." }
-    if ($vol.letter -match '^[A-Z]$' -and (Test-Path ($vol.letter + ':\'))) { return $vol.letter }
-    $letter = @(Get-FreeLetters)[0]
-    try { Get-Partition -DiskNumber $Disk.Number -PartitionNumber $vol.partition | Set-Partition -NewDriveLetter $letter -ErrorAction Stop }
-    catch { & "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') $vol.path | Out-Null }
-    for ($i = 0; $i -lt 20 -and -not (Test-Path ($letter + ':\')); $i++) { Start-Sleep -Milliseconds 500 }
-    if (-not (Test-Path ($letter + ':\'))) { throw "Die Partition $Label liess sich nicht als $letter`: einbinden." }
-    $letter
+    # The letter a volume of this disk really has; one is given when it has none. Several letters and two methods are
+    # tried, and every failure is reported, so a stubborn Windows says why.
+    $log = @()
+    for ($round = 1; $round -le 3; $round++) {
+        $vol = (Get-DiskVolumes (Find-SelectedDisk))[$Label]
+        if (-not $vol) { $log += "Runde ${round}: Volume $Label noch nicht sichtbar"; Start-Sleep -Seconds 3; continue }
+        if ($vol.letter -match '^[A-Z]$') {
+            if (Wait-Root $vol.letter 3) { return $vol.letter }
+            $log += "Runde ${round}: $($vol.letter): ist eingetragen, aber nicht lesbar -> wird freigegeben"
+            & "$env:SystemRoot\System32\mountvol.exe" ($vol.letter + ':') /d 2>&1 | Out-Null
+            Start-Sleep -Seconds 1
+        }
+        foreach ($letter in @(Get-FreeLetters | Select-Object -First 4)) {
+            try {
+                Get-Partition -DiskNumber $Disk.Number -PartitionNumber $vol.partition |
+                    Set-Partition -NewDriveLetter $letter -ErrorAction Stop
+            }
+            catch {
+                $log += "Set-Partition ${letter}: $($_.Exception.Message.Trim())"
+                $out = (& "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') $vol.path 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE) { $log += "mountvol ${letter}: $out" }
+            }
+            if (Wait-Root $letter) { return $letter }
+            $log += "${letter}: nach dem Zuweisen nicht lesbar (Typ $($vol.type), FS $($vol.fs))"
+            & "$env:SystemRoot\System32\mountvol.exe" ($letter + ':') /d 2>&1 | Out-Null
+        }
+        Start-Sleep -Seconds 3
+    }
+    throw ("Die Partition $Label liess sich nicht einbinden:`n  " + ($log -join "`n  "))
 }
 
 function Assert-Letter($Letter, $FileSystem, $Label) {

@@ -48,21 +48,22 @@ try {
     $wasEsp = ([string]$bootPart.GptType).ToLowerInvariant() -eq $EspType
     if ($wasEsp) { Set-PartType $disk.Number $bootPart.PartitionNumber $DataType }
     $used = @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { [string]$_.Name })
+    $used += @([Environment]::GetLogicalDrives() | ForEach-Object { ([string]$_).Substring(0, 1) })
     $letter = @('X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P') | Where-Object { $used -notcontains $_ } | Select-Object -First 1
     Get-Partition -DiskNumber $disk.Number -PartitionNumber $bootPart.PartitionNumber | Set-Partition -NewDriveLetter $letter
-    for ($i = 0; $i -lt 20 -and -not (Test-Path ($letter + ':\')); $i++) { Start-Sleep -Milliseconds 500 }
-    if (-not (Test-Path ($letter + ':\'))) { throw 'XT12BOOT liess sich nicht einbinden.' }
+    for ($i = 0; $i -lt 20 -and -not [IO.Directory]::Exists($letter + ':\'); $i++) { Start-Sleep -Milliseconds 500 }
+    if (-not [IO.Directory]::Exists($letter + ':\')) { throw 'XT12BOOT liess sich nicht einbinden.' }
 
     $root = $letter + ':\'
     $active = Join-Path $root 'EFI'
     $iris = Join-Path $root 'EFI-IRIS-XE'
     $base = Join-Path $root 'EFI-BASIS'
-    if ((Test-Path $iris) -eq (Test-Path $base)) { throw 'Auf XT12BOOT ist kein eindeutiges zweites Profil vorhanden.' }
-    if (Test-Path $iris) { $mode = 'IRIS'; $source = $iris; $keep = 'EFI-BASIS' }
+    if ([IO.Directory]::Exists($iris) -eq [IO.Directory]::Exists($base)) { throw 'Auf XT12BOOT ist kein eindeutiges zweites Profil vorhanden.' }
+    if ([IO.Directory]::Exists($iris)) { $mode = 'IRIS'; $source = $iris; $keep = 'EFI-BASIS' }
     else { $mode = 'BASIS'; $source = $base; $keep = 'EFI-IRIS-XE' }
     foreach ($dir in @($active, $source)) {
         foreach ($f in @('BOOT\BOOTx64.efi', 'OC\OpenCore.efi', 'OC\config.plist')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $dir $f))) { throw ('EFI-Datei fehlt: ' + (Join-Path $dir $f)) }
+            if (-not [IO.File]::Exists((Join-Path $dir $f))) { throw ('EFI-Datei fehlt: ' + (Join-Path $dir $f)) }
         }
     }
     Write-Host ''
