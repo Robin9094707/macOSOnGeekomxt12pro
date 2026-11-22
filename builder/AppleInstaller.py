@@ -124,8 +124,8 @@ def fetch_tahoe(fullinstaller, product, directory):
         if verified != size:
             _trim(part, verified)
             raise FetchError(f"Apples Blockpruefung stoppte bei {verified / GIB:.2f} GiB. Erneut starten setzt dort fort.")
-    print("  Pruefe das Paketarchiv (xar) ...", flush=True)
-    fullinstaller.verify_xar(str(part))
+    print("  Pruefe das Paketarchiv (xar, liest das ganze Paket noch einmal) ...", flush=True)
+    fullinstaller.verify_xar(str(part), progress=progress_printer("Paketarchiv"))
     if part != final:
         part.replace(final)
     print("  Berechne die SHA-256 fuer die spaetere Kopierpruefung ...", flush=True)
