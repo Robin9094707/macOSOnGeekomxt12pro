@@ -1,0 +1,10 @@
+XT12BOOT - Startpartition (OpenCore) der XT12-Pro-Platte
+=========================================================
+EFI                    aktives OpenCore-Profil (zu Beginn BASIS)
+EFI-IRIS-XE / EFI-BASIS das jeweils andere Profil
+com.apple.recovery.boot macOS 26 Tahoe Recovery (startet offline)
+XT12Pro-BIOS.html      BIOS-Einstellungen fuer genau diesen PC
+.1401-build            Kennung fuer Liberator (nicht loeschen)
+
+Anleitung: XT12DATA\LIESMICH.txt
+Profil umschalten: XT12DATA\EFI-Profil-wechseln.cmd (Windows) oder XT12DATA/macOS/EFI-Profil-wechseln.command (macOS)

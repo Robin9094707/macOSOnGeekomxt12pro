@@ -1,0 +1,63 @@
+GEEKOM XT12 Pro  ->  macOS 26 Tahoe  ->  macOS 27 Golden Gate
+================================================================
+Diese Platte ist ein komplettes Offline-Installationsmedium. Alles Noetige liegt hier:
+
+  XT12BOOT (2 GB)   OpenCore: EFI (aktiv, Profil BASIS) und EFI-IRIS-XE (Iris-Xe-Profil),
+                    Tahoe-Recovery (com.apple.recovery.boot), XT12Pro-BIOS.html
+  XT12DATA          Tahoe\InstallAssistant.pkg        Apples Tahoe-Vollinstaller (~18 GB)
+                    GoldenGate\                        macOS 27.2 (26B123) Image, Kernel Debug Kit,
+                                                       Liberator 0.5.0 + Kit Beta 5
+                    Iris-Xe\                           WhateverXe Graphics 0.4.4
+                    macOS\                             die Skripte fuer die Mac-Seite
+                    EFI-Profil-wechseln.cmd            BASIS <-> IRIS von Windows aus
+  MACOS             (nur bei grossen Platten) wird zu APFS "Macintosh HD": hier landen Tahoe und Golden Gate
+
+Ablauf
+------
+ 0. BIOS (DEL beim Start): Einstellungen aus XT12BOOT\XT12Pro-BIOS.html. Wichtig: Secure Boot aus,
+    wenn moeglich DVMT Pre-Allocated 64 MB oder mehr (96 MB ideal), CSM aus.
+    Monitor per HDMI direkt anschliessen, Ethernet-Kabel anschliessen.
+
+ 1. Starten von der externen Platte: beim Einschalten F7 (GEEKOM-Bootmenue; falls nicht: F12 oder ESC),
+    "UEFI: <Platte>" waehlen.
+    Im OpenCore-Menue "Recovery 26..." (Tahoe-Recovery) waehlen. Sprache waehlen.
+    Dienstprogramme > Terminal:
+
+        bash /Volumes/XT12DATA/macOS/1-Tahoe-installieren.sh
+
+    Das Skript sucht die Partition MACOS, fragt einmal nach (JA), legt APFS "Macintosh HD" an und installiert
+    Tahoe direkt von der Platte. Nichts wird aus dem Internet geladen.
+    (Eigenes Ziel: vorher im Festplattendienstprogramm ein APFS-Volume anlegen und den Namen mitgeben:
+        bash /Volumes/XT12DATA/macOS/1-Tahoe-installieren.sh "Mein Volume")
+
+ 2. Der PC startet mehrmals neu. Jedes Mal von der externen Platte starten und im OpenCore-Menue erst
+    "macOS Installer", spaeter "Macintosh HD" waehlen. Dann den Mac einrichten.
+
+ 3. In Tahoe: XT12DATA > macOS > 2-Nach-der-Installation.command doppelklicken (oder im Terminal:
+        bash /Volumes/XT12DATA/macOS/2-Nach-der-Installation.command )
+    Lauf 1: kopiert Golden Gate an die Stellen, an denen Liberator sucht, und schaltet auf das IRIS-Profil.
+            -> Neustart (wieder von der externen Platte, "Macintosh HD").
+    Lauf 2: installiert WhateverXe Graphics (Iris-Xe-Beschleunigung).  -> Neustart.
+    Lauf 3: zeigt Grafik/Metal an und oeffnet Liberator.
+
+ 4. Liberator: "Set up as a new Mac instead" leer lassen, "Prepare for Golden Gate" druecken.
+    Liberator findet macOS 27, das KDK und das Kit auf dem Mac und laedt diese grossen Dateien nicht neu.
+    (Ein paar Kilobyte Pruefdaten/Schluessel holt es von Apple -> Ethernet angeschlossen lassen.)
+    Danach neu starten. Bei "PCI configuration" bis zu 2 Minuten warten.
+
+Zurueck / Notfall
+-----------------
+ - Schwarzes Bild nach dem IRIS-Profil: Windows starten, XT12DATA\EFI-Profil-wechseln.cmd -> BASIS.
+ - Golden Gate startet nicht: im OpenCore-Menue "Macintosh HD" (Tahoe) waehlen, Liberator oeffnen,
+   "Cancel Golden Gate" (Startdateien zurueck) oder "Remove macOS 27". Dort auch "Send a report".
+ - Windows bleibt immer unangetastet: im F7-Menue "Windows Boot Manager" waehlen.
+
+Was geht, was (noch) nicht
+--------------------------
+ Tahoe:  Iris Xe mit Metal (WhateverXe), USB, Ethernet, Audio teilweise, MediaTek-WLAN/-BT experimentell.
+         KEIN AirDrop/Continuity mit dem MediaTek-Chip (kein awdl-Treiber). Dafuer muesste die M.2-WLAN-Karte
+         gegen eine Broadcom-Karte (z. B. BCM94360NG) getauscht werden.
+ macOS 27 Golden Gate (Liberator Beta 5, experimentell):
+         KEIN WLAN und KEIN Bluetooth, Ethernet ja. Iris Xe wird von Tahoe "mitgenommen" (apple-Pfad),
+         auf echter Hardware mit Iris Xe bisher kaum erprobt. SIP/AMFI sind gelockert: nur als Testsystem.
+         Keine Apple-Updates installieren (Liberator haelt sie zurueck).
